@@ -932,8 +932,11 @@ mod tests {
         })?;
         assert_eq!(byte_value, 255);
 
-        let value = 5_u128;
-        let decimal = db.query_row("SELECT ? + 0::DECIMAL(38,0)", [&value], |row| {
+        // An INTEGER parameter keeps the DECIMAL(38,0) of the other argument;
+        // an addition would widen it to DECIMAL(39,0) where DuckDB has wide
+        // decimals.
+        let value = 5_i32;
+        let decimal = db.query_row("SELECT greatest(?, 0::DECIMAL(38,0))", [&value], |row| {
             row.get_ref(0).map(|value| value.to_owned())
         })?;
         assert_eq!(decimal, Value::Decimal(Decimal::new(38, 0, 5)?));

@@ -60,8 +60,9 @@ fn test_large_arrow_types() -> crate::Result<()> {
 }
 
 fn test_with_database(database: &Connection) -> crate::Result<()> {
-    // `tuple` is a DuckDB 2.0 type that the v1 wrapper does not model yet.
-    let excluded = ["time_tz", "time_ns", "bignum", "tuple"];
+    // `tuple` is a DuckDB 2.0 type that the v1 wrapper does not model yet,
+    // `geography` a DuckDB 2.1 one.
+    let excluded = ["time_tz", "time_ns", "bignum", "tuple", "geography"];
 
     let mut binding = database.prepare(&format!(
         "SELECT * EXCLUDE ({}) FROM test_all_types()",

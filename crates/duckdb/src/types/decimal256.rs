@@ -308,18 +308,19 @@ mod test {
         Ok(db)
     }
 
-    /// Whether this DuckDB exports HUGEINT and UHUGEINT as Decimal256(39, 0)
-    /// at Arrow format version 1.1, or still as Decimal128(38, 0).
-    fn int128_exports_as_decimal256(db: &Connection) -> Result<bool> {
+    /// Whether this DuckDB exports UHUGEINT as Decimal256(39, 0) at Arrow
+    /// format version 1.1, or still as Decimal128(38, 0). The tests do not
+    /// depend on the Arrow type HUGEINT is exported as.
+    fn uhugeint_exports_as_decimal256(db: &Connection) -> Result<bool> {
         use arrow::datatypes::DataType;
 
-        let mut stmt = db.prepare("SELECT 1::HUGEINT, 1::UHUGEINT")?;
+        let mut stmt = db.prepare("SELECT 1::UHUGEINT")?;
         let schema = stmt.query_arrow([])?.get_schema();
-        let types = [schema.field(0).data_type().clone(), schema.field(1).data_type().clone()];
-        if types == [DataType::Decimal256(39, 0), DataType::Decimal256(39, 0)] {
+        let data_type = schema.field(0).data_type();
+        if data_type == &DataType::Decimal256(39, 0) {
             Ok(true)
         } else {
-            assert_eq!(types, [DataType::Decimal128(38, 0), DataType::Decimal128(38, 0)]);
+            assert_eq!(data_type, &DataType::Decimal128(38, 0));
             Ok(false)
         }
     }
@@ -664,10 +665,10 @@ mod test {
         );
 
         // Without metadata for the child, a value above the signed range is
-        // still exact once DuckDB exports the 128-bit integers as Decimal256.
+        // still exact once DuckDB exports UHUGEINT as Decimal256.
         // (Before that a nested UHUGEINT of 2^127 or more arrives as a
         // negative Decimal128.)
-        if int128_exports_as_decimal256(&db)? {
+        if uhugeint_exports_as_decimal256(&db)? {
             let list = db.query_row(
                 "SELECT [340282366920938463463374607431768211455::UHUGEINT, 1::UHUGEINT]",
                 [],

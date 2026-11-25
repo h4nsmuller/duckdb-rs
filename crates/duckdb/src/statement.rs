@@ -645,6 +645,10 @@ impl Statement<'_> {
                 let decimal = crate::types::to_duckdb_decimal(d);
                 ffi::duckdb_bind_decimal(ptr, col as u64, decimal)
             },
+            ValueRef::Decimal256(d) => {
+                let decimal = crate::types::to_duckdb_decimal256(d)?;
+                unsafe { ffi::duckdb_bind_decimal(ptr, col as u64, decimal) }
+            }
             _ => {
                 return Err(Error::ToSqlConversionFailure(
                     binding_unsupported_value(value.data_type()).into(),

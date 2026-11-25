@@ -45,6 +45,19 @@
 //! children where the borrowed container API does not carry DuckDB child
 //! logical metadata.
 //!
+//! A `DECIMAL` of 39 to 76 digits (for example the sum of two
+//! `DECIMAL(38, 2)` values, a `DECIMAL(39, 2)`) arrives as an Arrow
+//! `Decimal256` and uses [`Decimal256`] through [`Value::Decimal256`] and
+//! [`ValueRef::Decimal256`]. Reading one as [`Decimal`], an integer, or a
+//! `rust_decimal::Decimal` succeeds when the value fits exactly and fails
+//! otherwise. From Arrow format version 1.1 DuckDB also exports `HUGEINT` and
+//! `UHUGEINT` as `Decimal256(39, 0)`; these keep reading as
+//! [`Value::HugeInt`] and [`Value::UHugeInt`], with the same metadata rules
+//! as above (a metadata-less value above the signed range reads as
+//! [`Value::UHugeInt`]). Arrow has no decimal of more than 76 digits: a query
+//! that returns one fails with an error from DuckDB, and its digits can be
+//! read through a `VARCHAR` cast.
+//!
 //! DuckDB `GEOMETRY` values use [`Value::Geometry`] and
 //! [`ValueRef::Geometry`], backed by WKB bytes. CRS data is exposed as logical
 //! type metadata through [`crate::core::LogicalTypeHandle::geometry_crs`]
@@ -56,6 +69,7 @@
 
 pub use self::{
     decimal::{Decimal, DecimalError},
+    decimal256::Decimal256,
     from_sql::{FromSql, FromSqlError, FromSqlResult},
     ordered_map::OrderedMap,
     string::DuckString,
@@ -64,6 +78,9 @@ pub use self::{
     value_ref::{EnumType, ListType, TimeUnit, ValueRef},
 };
 pub(crate) use decimal::to_duckdb_decimal;
+#[cfg(feature = "vtab-arrow")]
+pub(crate) use decimal256::i256_to_bignum_blob;
+pub(crate) use decimal256::to_duckdb_decimal256;
 pub(crate) use value_ref::{binding_unsupported_value, value_ref_from_value};
 
 mod bind_container;
@@ -86,6 +103,7 @@ mod value;
 mod value_ref;
 
 mod decimal;
+mod decimal256;
 mod ordered_map;
 mod string;
 

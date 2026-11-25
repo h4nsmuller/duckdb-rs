@@ -264,6 +264,12 @@ impl Appender<'_> {
                 let decimal = crate::types::to_duckdb_decimal(d);
                 append_decimal(ptr, decimal)?
             },
+            // The C API has no value constructor for a decimal of more than 128
+            // bits. The appender casts the exact digits to the column type.
+            ValueRef::Decimal256(d) => unsafe {
+                let digits = d.to_string();
+                ffi::duckdb_append_varchar_length(ptr, digits.as_ptr() as *const c_char, digits.len() as u64)
+            },
             _ => {
                 return Err(Error::ToSqlConversionFailure(
                     appending_unsupported_value(value.data_type()).into(),
@@ -394,7 +400,8 @@ fn validate_appender_value_ref(value: ValueRef<'_>) -> Result<()> {
         | ValueRef::Date32(_)
         | ValueRef::Time64(_, _)
         | ValueRef::Interval { .. }
-        | ValueRef::Decimal(_) => Ok(()),
+        | ValueRef::Decimal(_)
+        | ValueRef::Decimal256(_) => Ok(()),
         _ => Err(Error::ToSqlConversionFailure(
             appending_unsupported_value(value.data_type()).into(),
         )),

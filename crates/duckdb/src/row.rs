@@ -2,7 +2,7 @@ use std::{convert, sync::Arc};
 
 use super::{Error, Result, Statement};
 use crate::core::LogicalTypeId;
-use crate::types::{self, Decimal, EnumType, FromSql, FromSqlError, ListType, ValueRef};
+use crate::types::{self, Decimal, Decimal256, EnumType, FromSql, FromSqlError, ListType, ValueRef};
 
 use arrow::{
     array::{
@@ -292,6 +292,16 @@ fn decimal_value_ref(width: u8, scale: i8, value: i128) -> ValueRef<'static> {
     ValueRef::Decimal(Decimal::from_chunk(width, scale, value))
 }
 
+fn decimal256_value_ref(width: u8, scale: i8, value: i256) -> ValueRef<'static> {
+    let scale = Decimal256::validate_signed_scale(width, scale)
+        .unwrap_or_else(|err| panic!("Invalid Arrow decimal metadata for width {width} scale {scale}: {err}"));
+    ValueRef::Decimal256(Decimal256::from_chunk(width, scale, value))
+}
+
+/// Width of the Arrow `Decimal256` DuckDB exports HUGEINT and UHUGEINT as from
+/// Arrow format version 1.1: 39 digits hold the full range of both.
+const INT128_DECIMAL256_WIDTH: u8 = 39;
+
 #[allow(clippy::needless_lifetimes)]
 impl<'stmt> Row<'stmt> {
     /// Get the value of a particular column of the result row.
@@ -384,16 +394,25 @@ impl<'stmt> Row<'stmt> {
             // metadata recovers UHUGEINT and DECIMAL; otherwise preserve the
             // existing HugeInt fallback for parameter-derived or metadata-less
             // results.
+            //
+            // From Arrow format version 1.1 the same holds one size up:
+            // HUGEINT, UHUGEINT, and DECIMAL(39,0) share Decimal256(39,0), and
+            // value_ref_internal picks the narrowest carrier that holds the
+            // value exactly.
             ValueRef::HugeInt(value) => match self.stmt.result_column_logical_id(col) {
                 Some(LogicalTypeId::UHugeint) => ValueRef::UHugeInt(value as u128),
-                Some(LogicalTypeId::Decimal) => {
-                    if let DataType::Decimal128(width, 0) = column.data_type() {
-                        decimal_value_ref(*width, 0, value)
-                    } else {
-                        ValueRef::HugeInt(value)
-                    }
-                }
+                Some(LogicalTypeId::Decimal) => match column.data_type() {
+                    DataType::Decimal128(width, 0) => decimal_value_ref(*width, 0, value),
+                    DataType::Decimal256(width, 0) => decimal256_value_ref(*width, 0, i256::from_i128(value)),
+                    _ => ValueRef::HugeInt(value),
+                },
                 _ => ValueRef::HugeInt(value),
+            },
+            ValueRef::UHugeInt(value) => match (self.stmt.result_column_logical_id(col), column.data_type()) {
+                (Some(LogicalTypeId::Decimal), DataType::Decimal256(width, 0)) => {
+                    decimal256_value_ref(*width, 0, i256::from_parts(value, 0))
+                }
+                _ => ValueRef::UHugeInt(value),
             },
             value => value,
         }
@@ -491,6 +510,27 @@ impl<'stmt> Row<'stmt> {
                     ValueRef::HugeInt(value)
                 } else {
                     decimal_value_ref(*width, *scale, value)
+                }
+            }
+            DataType::Decimal256(width, scale) => {
+                let array = column.as_any().downcast_ref::<array::Decimal256Array>().unwrap();
+                let value = array.value(row);
+                if *scale == 0 && *width == INT128_DECIMAL256_WIDTH {
+                    // HUGEINT, UHUGEINT, or DECIMAL(39,0): the Arrow type does
+                    // not say which. Without result metadata (nested values,
+                    // parameter-derived results) keep a 128-bit integer
+                    // carrier when the value fits one, like the Decimal128
+                    // shape above; the value is exact either way.
+                    let (low, high) = value.to_parts();
+                    if let Some(value) = value.to_i128() {
+                        ValueRef::HugeInt(value)
+                    } else if high == 0 {
+                        ValueRef::UHugeInt(low)
+                    } else {
+                        decimal256_value_ref(*width, *scale, value)
+                    }
+                } else {
+                    decimal256_value_ref(*width, *scale, value)
                 }
             }
             DataType::Timestamp(unit, _) if *unit == TimeUnit::Second => {
@@ -1044,7 +1084,14 @@ mod tests {
             Ok(value.to_owned())
         })?;
 
-        assert_eq!(list, Value::List(vec![Value::HugeInt(-1)]));
+        // As Decimal128(38,0) the 128 bits arrive in the signed carrier. From
+        // Arrow format version 1.1 DuckDB exports Decimal256(39,0), which holds
+        // the unsigned value.
+        let expected = match list {
+            Value::List(ref items) if items == &[Value::UHugeInt(u128::MAX)] => Value::UHugeInt(u128::MAX),
+            _ => Value::HugeInt(-1),
+        };
+        assert_eq!(list, Value::List(vec![expected.clone()]));
 
         let structure = db.query_row(
             &format!("SELECT struct_pack(v := ({U128_MAX_SQL})::UHUGEINT)"),
@@ -1058,7 +1105,7 @@ mod tests {
 
         match structure {
             Value::Struct(fields) => {
-                assert_eq!(fields.get(&"v".to_string()), Some(&Value::HugeInt(-1)));
+                assert_eq!(fields.get(&"v".to_string()), Some(&expected));
             }
             other => panic!("expected struct, got {other:?}"),
         }

@@ -1,5 +1,5 @@
 use super::{Type, Value};
-use crate::types::{Decimal, FromSqlError, FromSqlResult, OrderedMap};
+use crate::types::{Decimal, Decimal256, FromSqlError, FromSqlResult, OrderedMap};
 
 use crate::{Error, Result, Row};
 use arrow::{
@@ -85,6 +85,10 @@ pub enum ValueRef<'a> {
     /// [`Decimal`] stores DuckDB's decimal width, scale, and scaled integer
     /// payload.
     Decimal(Decimal),
+    /// The value is a DuckDB decimal of 39 to 76 digits.
+    ///
+    /// [`Decimal256`] stores the width, scale, and scaled integer payload.
+    Decimal256(Decimal256),
     /// The value is a timestamp.
     Timestamp(TimeUnit, i64),
     /// The value is a text string.
@@ -164,6 +168,7 @@ impl ValueRef<'_> {
             ValueRef::Float(_) => Type::Float,
             ValueRef::Double(_) => Type::Double,
             ValueRef::Decimal(_) => Type::Decimal,
+            ValueRef::Decimal256(_) => Type::Decimal,
             ValueRef::Timestamp(..) => Type::Timestamp,
             ValueRef::Text(_) => Type::Text,
             ValueRef::Blob(_) => Type::Blob,
@@ -258,6 +263,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Float(i) => Self::Float(i),
             ValueRef::Double(i) => Self::Double(i),
             ValueRef::Decimal(i) => Self::Decimal(i),
+            ValueRef::Decimal256(i) => Self::Decimal256(i),
             ValueRef::Timestamp(tu, t) => Self::Timestamp(tu, t),
             ValueRef::Text(s) => {
                 let s = std::str::from_utf8(s).expect("invalid UTF-8");
@@ -391,6 +397,13 @@ impl From<Decimal> for ValueRef<'_> {
     }
 }
 
+impl From<Decimal256> for ValueRef<'_> {
+    #[inline]
+    fn from(decimal: Decimal256) -> Self {
+        Self::Decimal256(decimal)
+    }
+}
+
 pub(crate) fn value_ref_from_value<'a>(
     value: &'a Value,
     unsupported_message: impl FnOnce(&'static str) -> String,
@@ -423,6 +436,7 @@ fn unsupported_value_variant(value: &Value) -> Option<&'static str> {
         | Value::Float(_)
         | Value::Double(_)
         | Value::Decimal(_)
+        | Value::Decimal256(_)
         | Value::Timestamp(_, _)
         | Value::Text(_)
         | Value::Blob(_)
@@ -465,6 +479,7 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Float(i) => ValueRef::Float(i),
             Value::Double(i) => ValueRef::Double(i),
             Value::Decimal(i) => ValueRef::Decimal(i),
+            Value::Decimal256(i) => ValueRef::Decimal256(i),
             Value::Timestamp(tu, t) => ValueRef::Timestamp(tu, t),
             Value::Text(ref s) => ValueRef::Text(s.as_bytes()),
             Value::Blob(ref b) => ValueRef::Blob(b),

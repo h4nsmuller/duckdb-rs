@@ -146,4 +146,63 @@ mod tests {
 
         Ok(())
     }
+
+    /// Polars decimals hold 38 digits. DuckDB exports a DECIMAL of 39 to 76
+    /// digits as Decimal256, and from Arrow format version 1.1 also HUGEINT
+    /// and UHUGEINT (so every integer `sum`).
+    #[test]
+    fn test_query_polars_narrows_decimal256_exactly() -> Result<()> {
+        let db = checked_memory_handle();
+        db.execute_batch("SET arrow_output_version = '1.1'")?;
+
+        let mut stmt = db.prepare(
+            "SELECT sum(i) AS s,
+                    1.5::DECIMAL(38,2) + 1.5::DECIMAL(38,2) AS d,
+                    [-99999999999999999999999999999999999999::HUGEINT, NULL] AS l,
+                    NULL::DECIMAL(60,3) AS n
+             FROM range(10) t(i)",
+        )?;
+        let mut polars = stmt.query_polars([])?;
+        let df = polars.next().expect("Failed to get DataFrame");
+
+        let column = df.column("s").expect("missing s column");
+        assert_eq!(column.dtype(), &DataType::Decimal(Some(38), Some(0)));
+        assert_eq!(column.get(0).expect("missing s value"), AnyValue::Decimal(45, 0));
+
+        let column = df.column("d").expect("missing d column");
+        assert_eq!(column.dtype(), &DataType::Decimal(Some(38), Some(2)));
+        assert_eq!(column.get(0).expect("missing d value"), AnyValue::Decimal(300, 2));
+
+        let column = df.column("l").expect("missing l column");
+        assert_eq!(
+            column.dtype(),
+            &DataType::List(Box::new(DataType::Decimal(Some(38), Some(0))))
+        );
+        let AnyValue::List(items) = column.get(0).expect("missing l value") else {
+            panic!("expected a list");
+        };
+        assert_eq!(
+            items.get(0).expect("missing item"),
+            AnyValue::Decimal(-99_999_999_999_999_999_999_999_999_999_999_999_999, 0)
+        );
+        assert_eq!(items.get(1).expect("missing item"), AnyValue::Null);
+
+        let column = df.column("n").expect("missing n column");
+        assert_eq!(column.dtype(), &DataType::Decimal(Some(38), Some(3)));
+        assert_eq!(column.get(0).expect("missing n value"), AnyValue::Null);
+        assert!(polars.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "Could not narrow a DECIMAL of more than 38 digits for Polars")]
+    fn test_query_polars_rejects_decimal_that_does_not_fit() {
+        let db = checked_memory_handle();
+        db.execute_batch("SET arrow_output_version = '1.1'").unwrap();
+
+        let digits = "9".repeat(39);
+        let mut stmt = db.prepare(&format!("SELECT {digits}::DECIMAL(39,0) AS x")).unwrap();
+        let mut polars = stmt.query_polars([]).unwrap();
+        let _ = polars.next();
+    }
 }

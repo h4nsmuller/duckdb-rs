@@ -770,10 +770,122 @@ fn test_timestamp_tz_insert() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The DuckDB type of a scanned column and the text of each of its values.
+type ScannedDecimals = (String, Vec<Option<String>>);
+
+/// Scans a Decimal256 array through the Arrow table function and returns the
+/// DuckDB type of the column and the text of each value.
+fn scan_decimal256(array: Decimal256Array) -> Result<ScannedDecimals, Box<dyn Error>> {
+    let batch = RecordBatch::try_from_iter(vec![("x", Arc::new(array) as ArrayRef)])?;
+
+    let db = Connection::open_in_memory()?;
+    db.register_table_function::<ArrowVTab>("arrow")?;
+
+    let mut stmt = db.prepare("SELECT typeof(x), x::VARCHAR FROM arrow(?)")?;
+    let rows = stmt
+        .query_map([&ArrowBatchRegistration::new(batch)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<crate::Result<Vec<_>>>()?;
+    let ty = rows[0].0.clone();
+    Ok((ty, rows.into_iter().map(|(_, value)| value).collect()))
+}
+
+#[test]
+fn test_arrow_decimal256_is_an_exact_decimal() -> Result<(), Box<dyn Error>> {
+    let nines = "9".repeat(76);
+    let max = i256::from_string(&nines).unwrap();
+
+    // 76 digits: the widest Arrow decimal.
+    let array = Decimal256Array::from(vec![
+        Some(max),
+        Some(-max),
+        Some(i256::ZERO),
+        None,
+        Some(i256::from(-15)),
+    ])
+    .with_precision_and_scale(76, 10)?;
+    let (ty, values) = scan_decimal256(array)?;
+    assert_eq!(ty, "DECIMAL(76,10)");
+    let text = format!("{}.{}", &nines[..66], &nines[..10]);
+    assert_eq!(
+        values,
+        vec![
+            Some(text.clone()),
+            Some(format!("-{text}")),
+            Some("0.0000000000".to_string()),
+            None,
+            Some("-0.0000000015".to_string()),
+        ]
+    );
+
+    // 39 digits: the narrowest width DuckDB stores as BIGNUM.
+    let digits = &nines[..39];
+    let value = i256::from_string(digits).unwrap();
+    let array = Decimal256Array::from(vec![Some(-value), None, Some(value), Some(i256::from(256))])
+        .with_precision_and_scale(39, 0)?;
+    let (ty, values) = scan_decimal256(array)?;
+    assert_eq!(ty, "DECIMAL(39,0)");
+    assert_eq!(
+        values,
+        vec![
+            Some(format!("-{digits}")),
+            None,
+            Some(digits.to_string()),
+            Some("256".to_string())
+        ]
+    );
+
+    // Widths DuckDB stores in an integer.
+    for (width, scale, digits, expected) in [
+        (4_u8, 1_i8, "-9999", "-999.9"),
+        (9, 2, "-999999999", "-9999999.99"),
+        (18, 3, "999999999999999999", "999999999999999.999"),
+        (
+            38,
+            4,
+            "-99999999999999999999999999999999999999",
+            "-9999999999999999999999999999999999.9999",
+        ),
+    ] {
+        let array = Decimal256Array::from(vec![Some(i256::from_string(digits).unwrap()), None])
+            .with_precision_and_scale(width, scale)?;
+        let (ty, values) = scan_decimal256(array)?;
+        assert_eq!(ty, format!("DECIMAL({width},{scale})"));
+        assert_eq!(values, vec![Some(expected.to_string()), None]);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_arrow_decimal256_roundtrip() -> Result<(), Box<dyn Error>> {
+    let max = i256::from_string(&"9".repeat(50)).unwrap();
+    let array = Decimal256Array::from(vec![Some(max), Some(-max), None, Some(i256::from(-1))])
+        .with_precision_and_scale(50, 20)?;
+    let batch = RecordBatch::try_from_iter(vec![("x", Arc::new(array.clone()) as ArrayRef)])?;
+
+    let db = Connection::open_in_memory()?;
+    // Decimal256 exists from Arrow format version 1.1.
+    db.execute_batch("SET arrow_output_version = '1.1'")?;
+    db.register_table_function::<ArrowVTab>("arrow")?;
+
+    let rb = db
+        .prepare("SELECT x FROM arrow(?)")?
+        .query_arrow([&ArrowBatchRegistration::new(batch)])?
+        .next()
+        .expect("no record batch");
+    let column = rb.column(0).as_any().downcast_ref::<Decimal256Array>().unwrap();
+    assert_eq!(column, &array);
+    Ok(())
+}
+
 #[test]
 fn test_arrow_error() {
-    let arc: ArrayRef = Arc::new(Decimal256Array::from(vec![i256::from(1), i256::from(2), i256::from(3)]));
-    let batch = RecordBatch::try_from_iter(vec![("x", arc)]).unwrap();
+    // 100 does not fit in DECIMAL(2, 0).
+    let array = Decimal256Array::from(vec![i256::from(1), i256::from(100)])
+        .with_precision_and_scale(2, 0)
+        .unwrap();
+    let batch = RecordBatch::try_from_iter(vec![("x", Arc::new(array) as ArrayRef)]).unwrap();
 
     let db = Connection::open_in_memory().unwrap();
     db.register_table_function::<ArrowVTab>("arrow").unwrap();
@@ -790,7 +902,7 @@ fn test_arrow_error() {
                 extended_code: 1
             },
             Some(
-                "Invalid Input Error: Data type \"Decimal256(76, 10)\" not yet supported by Arrow-to-DuckDB conversion"
+                "Invalid Input Error: invalid Arrow decimal value at row 1: decimal value has 3 digits, exceeding width 2"
                     .to_owned()
             )
         )

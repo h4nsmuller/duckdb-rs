@@ -14,7 +14,9 @@ use crate::core::{LogicalTypeHandle, LogicalTypeId};
 use crate::ffi;
 use crate::{Error, Result};
 
-use super::{Decimal, OrderedMap, TimeUnit, Value, binding_unsupported_value, to_duckdb_hugeint, to_duckdb_uhugeint};
+use super::{
+    Decimal, Decimal256, OrderedMap, TimeUnit, Value, binding_unsupported_value, to_duckdb_hugeint, to_duckdb_uhugeint,
+};
 
 /// A `duckdb_value` this module owns.
 ///
@@ -285,6 +287,7 @@ fn create_value_with_shape(value: &Value, shape: &Shape<'_>, ty: &BuiltType) -> 
             _ => Err(conversion("internal error: map shape has no key type")),
         },
         (Value::Decimal(decimal), Shape::Decimal { width, scale }) => create_decimal(*decimal, *width, *scale),
+        (Value::Decimal256(decimal), Shape::Decimal { width, scale }) => create_decimal256(*decimal, *width, *scale),
         _ => create_value(value),
     }
 }
@@ -306,6 +309,16 @@ fn create_decimal(decimal: Decimal, width: u8, scale: u8) -> Result<OwnedDuckVal
             value: to_duckdb_hugeint(decimal.value()),
         })
     };
+    OwnedDuckValue::from_raw(ptr, "scalar")
+}
+
+fn create_decimal256(decimal: Decimal256, width: u8, scale: u8) -> Result<OwnedDuckValue> {
+    let mut raw = super::to_duckdb_decimal256(decimal)?;
+    raw.width = width;
+    raw.scale = scale;
+    // SAFETY: the struct holds plain integers. DuckDB copies them into a new
+    // value. A null return is rejected by `from_raw`.
+    let ptr = unsafe { ffi::duckdb_create_decimal(raw) };
     OwnedDuckValue::from_raw(ptr, "scalar")
 }
 
@@ -334,6 +347,7 @@ fn create_value(value: &Value) -> Result<OwnedDuckValue> {
                 scale: decimal.scale(),
                 value: to_duckdb_hugeint(decimal.value()),
             }),
+            Value::Decimal256(decimal) => return create_decimal256(*decimal, decimal.width(), decimal.scale()),
             Value::Timestamp(unit, v) => create_timestamp(*unit, *v),
             Value::Text(text) => {
                 let bytes = text.as_bytes();
@@ -559,6 +573,10 @@ fn value_shape<'a>(value: &'a Value) -> Result<Shape<'a>> {
         Value::Float(_) => Shape::Float,
         Value::Double(_) => Shape::Double,
         Value::Decimal(decimal) => Shape::Decimal {
+            width: decimal.width(),
+            scale: decimal.scale(),
+        },
+        Value::Decimal256(decimal) => Shape::Decimal {
             width: decimal.width(),
             scale: decimal.scale(),
         },

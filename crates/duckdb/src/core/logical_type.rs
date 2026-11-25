@@ -265,13 +265,15 @@ impl LogicalTypeHandle {
     }
 
     /// Retrieves the decimal width
-    /// Returns 0 if the LogicalType is not a decimal
+    /// Returns 0 if the LogicalType is not a decimal, or if the width is above
+    /// 255 and does not fit the return type
     pub fn decimal_width(&self) -> u8 {
         unsafe { duckdb_decimal_width(self.ptr) }
     }
 
     /// Retrieves the decimal scale
-    /// Returns 0 if the LogicalType is not a decimal
+    /// Returns 0 if the LogicalType is not a decimal, or if the width is above
+    /// 255
     pub fn decimal_scale(&self) -> u8 {
         unsafe { duckdb_decimal_scale(self.ptr) }
     }

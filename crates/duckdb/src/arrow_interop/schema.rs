@@ -2,7 +2,7 @@ use arrow::datatypes::*;
 
 use crate::{
     core::{LogicalTypeHandle, LogicalTypeId},
-    types::Decimal,
+    types::Decimal256,
 };
 
 use super::{UUID_BYTE_WIDTH, UUID_EXTENSION_NAME};
@@ -42,10 +42,10 @@ pub fn to_duckdb_type_id(data_type: &DataType) -> Result<LogicalTypeId, Box<dyn 
         DataType::Struct(_) => Struct,
         DataType::Union(_, _) => Union,
         // DataType::Dictionary(_, _) => todo!(),
-        DataType::Decimal32(_, _) | DataType::Decimal64(_, _) | DataType::Decimal128(_, _) => Decimal,
-        // Decimal256 binds as DOUBLE, but primitive_array_to_vector rejects it
-        // at execution because the conversion layer has no Decimal256 write path.
-        DataType::Decimal256(_, _) => Double,
+        DataType::Decimal32(_, _)
+        | DataType::Decimal64(_, _)
+        | DataType::Decimal128(_, _)
+        | DataType::Decimal256(_, _) => Decimal,
         DataType::Map(_, _) => Map,
         _ => {
             return Err(format!("Unsupported data type: {data_type:?}").into());
@@ -94,6 +94,7 @@ pub fn to_duckdb_logical_type(data_type: &DataType) -> Result<LogicalTypeHandle,
         DataType::Decimal32(width, scale) => to_duckdb_decimal_logical_type::<Decimal32Type>(*width, *scale),
         DataType::Decimal64(width, scale) => to_duckdb_decimal_logical_type::<Decimal64Type>(*width, *scale),
         DataType::Decimal128(width, scale) => to_duckdb_decimal_logical_type::<Decimal128Type>(*width, *scale),
+        DataType::Decimal256(width, scale) => to_duckdb_decimal_logical_type::<Decimal256Type>(*width, *scale),
         DataType::Map(field, _) => arrow_map_to_duckdb_logical_type(field),
         DataType::Boolean
         | DataType::Utf8
@@ -157,7 +158,9 @@ where
         )
         .into());
     }
-    Decimal::validate_signed_scale(width, scale)
+    // DuckDB stores a DECIMAL of up to 38 digits in an integer and a wider one
+    // as BIGNUM; every Arrow decimal width is a DuckDB decimal width.
+    Decimal256::validate_signed_scale(width, scale)
         .map_err(|err| format!("Unsupported data type: {data_type}, invalid decimal type: {err}").into())
 }
 

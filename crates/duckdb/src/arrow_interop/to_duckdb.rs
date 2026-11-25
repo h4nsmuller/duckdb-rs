@@ -17,7 +17,7 @@ use num::{ToPrimitive, cast::AsPrimitive};
 
 use crate::{
     core::{ArrayVector, DataChunkHandle, FlatVector, Inserter, ListVector, LogicalTypeId, StructVector},
-    types::Decimal,
+    types::{Decimal, Decimal256, i256_to_bignum_blob},
 };
 
 use super::{
@@ -362,6 +362,9 @@ fn primitive_array_to_vector(array: &dyn Array, out: &mut FlatVector<'_>) -> Res
         DataType::Decimal128(width, scale) => {
             decimal_array_to_vector::<Decimal128Type>(as_primitive_array(array), out, *width, *scale)?;
         }
+        DataType::Decimal256(width, scale) => {
+            decimal256_array_to_vector(as_primitive_array(array), out, *width, *scale)?;
+        }
         DataType::Interval(_) | DataType::Duration(_) => {
             let array = IntervalMonthDayNanoArray::from(
                 cast(array, &DataType::Interval(IntervalUnit::MonthDayNano))
@@ -480,6 +483,41 @@ where
     let value: i128 = array.value(row).into();
     Decimal::new(width, scale, value).map_err(|err| format!("invalid Arrow decimal value at row {row}: {err}"))?;
     Ok(value)
+}
+
+/// Convert an Arrow Decimal256 array to a DuckDB decimal vector.
+///
+/// DuckDB stores a decimal of up to 38 digits in an integer picked by the
+/// width, and the unscaled value of a wider one as a BIGNUM blob.
+fn decimal256_array_to_vector(
+    array: &PrimitiveArray<Decimal256Type>,
+    out: &mut FlatVector<'_>,
+    width: u8,
+    scale: i8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert!(array.len() <= out.capacity());
+
+    let scale = validate_arrow_decimal_metadata::<Decimal256Type>(width, scale)?;
+
+    for row in 0..array.len() {
+        if array.is_null(row) {
+            continue;
+        }
+        let value = array.value(row);
+        Decimal256::new(width, scale, value)
+            .map_err(|err| format!("invalid Arrow decimal value at row {row}: {err}"))?;
+        // A value of at most `width` digits fits the integer of that width.
+        match width {
+            1..=4 => unsafe { out.as_mut_slice::<i16>()[row] = value.as_i128() as i16 },
+            5..=9 => unsafe { out.as_mut_slice::<i32>()[row] = value.as_i128() as i32 },
+            10..=18 => unsafe { out.as_mut_slice::<i64>()[row] = value.as_i128() as i64 },
+            19..=38 => unsafe { out.as_mut_slice::<i128>()[row] = value.as_i128() },
+            _ => out.insert(row, i256_to_bignum_blob(value).as_slice()),
+        }
+    }
+
+    set_nulls_in_flat_vector(array, out);
+    Ok(())
 }
 
 /// Convert Arrow [BooleanArray] to a duckdb vector.

@@ -190,6 +190,46 @@ mod test {
     }
 
     #[test]
+    fn test_append_record_batch_decimal256() -> Result<()> {
+        use arrow::{
+            array::{Array, Decimal256Array},
+            datatypes::i256,
+        };
+
+        let db = Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE foo(d DECIMAL(50, 2))")?;
+
+        let digits = "9".repeat(50);
+        let max = i256::from_string(&digits).unwrap();
+        let array = Decimal256Array::from(vec![Some(max), None, Some(-max), Some(i256::from(-150))])
+            .with_precision_and_scale(50, 2)
+            .unwrap();
+        let schema = Schema::new(vec![Field::new("d", array.data_type().clone(), true)]);
+        let record_batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
+        {
+            let mut app = db.appender("foo")?;
+            app.append_record_batch(record_batch)?;
+        }
+
+        let values = db
+            .prepare("SELECT d::VARCHAR FROM foo ORDER BY rowid")?
+            .query_map([], |row| row.get::<_, Option<String>>(0))?
+            .collect::<Result<Vec<_>>>()?;
+        let text = format!("{}.99", &digits[..48]);
+        assert_eq!(
+            values,
+            vec![
+                Some(text.clone()),
+                None,
+                Some(format!("-{text}")),
+                Some("-1.50".to_string())
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_append_record_batch_large() -> Result<()> {
         let record_count = usize::pow(2, 16) + 1;
         let db = Connection::open_in_memory()?;

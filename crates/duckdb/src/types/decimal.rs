@@ -55,38 +55,45 @@ impl Hash for Decimal {
 
 impl fmt::Display for Decimal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let scale = usize::from(self.scale);
         let raw = self.value.unsigned_abs().to_string();
-
-        if scale == 0 {
-            return f.pad_integral(!self.value.is_negative(), "", &raw);
-        }
-
-        let mut magnitude = String::new();
-        if raw.len() <= scale {
-            magnitude.push_str("0.");
-            for _ in 0..(scale - raw.len()) {
-                magnitude.push('0');
-            }
-            magnitude.push_str(&raw);
-        } else {
-            let point = raw.len() - scale;
-            magnitude.push_str(&raw[..point]);
-            magnitude.push('.');
-            magnitude.push_str(&raw[point..]);
-        }
-
-        f.pad_integral(!self.value.is_negative(), "", &magnitude)
+        fmt_scaled_digits(f, !self.value.is_negative(), &raw, self.scale)
     }
 }
 
+/// Writes the digits of an unscaled magnitude with the decimal point `scale`
+/// digits from the right.
+pub(super) fn fmt_scaled_digits(f: &mut fmt::Formatter<'_>, is_nonnegative: bool, raw: &str, scale: u8) -> fmt::Result {
+    let scale = usize::from(scale);
+
+    if scale == 0 {
+        return f.pad_integral(is_nonnegative, "", raw);
+    }
+
+    let mut magnitude = String::new();
+    if raw.len() <= scale {
+        magnitude.push_str("0.");
+        for _ in 0..(scale - raw.len()) {
+            magnitude.push('0');
+        }
+        magnitude.push_str(raw);
+    } else {
+        let point = raw.len() - scale;
+        magnitude.push_str(&raw[..point]);
+        magnitude.push('.');
+        magnitude.push_str(&raw[point..]);
+    }
+
+    f.pad_integral(is_nonnegative, "", &magnitude)
+}
+
 impl Decimal {
-    /// DuckDB's maximum `DECIMAL` width.
+    /// The widest `DECIMAL` this type carries. Wider decimals use
+    /// [`Decimal256`](super::Decimal256).
     pub const MAX_WIDTH: u8 = 38;
 
     /// Builds a valid `DECIMAL(width, scale)` wrapper.
     ///
-    /// Returns [`DecimalError`] when `width` is outside DuckDB's `1..=38`
+    /// Returns [`DecimalError`] when `width` is outside the `1..=38`
     /// range, `scale` is larger than `width`, or `value` has more digits than
     /// `width` allows.
     pub fn new(width: u8, scale: u8, value: i128) -> std::result::Result<Self, DecimalError> {
@@ -149,11 +156,11 @@ impl Decimal {
 /// Error returned when constructing an invalid [`Decimal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecimalError {
-    /// The width is outside DuckDB's supported range.
+    /// The width is outside the range the decimal type supports.
     InvalidWidth {
         /// The requested width.
         width: u8,
-        /// DuckDB's maximum decimal width.
+        /// The maximum width of the decimal type.
         max: u8,
     },
     /// The scale is larger than the width.
@@ -176,7 +183,7 @@ impl fmt::Display for DecimalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::InvalidWidth { width, max } => {
-                write!(f, "decimal width {width} is outside DuckDB's 1..={max} range")
+                write!(f, "decimal width {width} is outside the 1..={max} range")
             }
             Self::ScaleExceedsWidth { scale, width } => {
                 write!(f, "decimal scale {scale} exceeds width {width}")
@@ -238,6 +245,7 @@ impl FromSql for Decimal {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         match value {
             ValueRef::Decimal(decimal) => Ok(decimal),
+            ValueRef::Decimal256(decimal) => super::decimal256::narrow_decimal256(decimal),
             ValueRef::TinyInt(i) => integer_decimal(i as i128),
             ValueRef::SmallInt(i) => integer_decimal(i as i128),
             ValueRef::Int(i) => integer_decimal(i as i128),
@@ -308,6 +316,11 @@ impl FromSql for rust_decimal::Decimal {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         match value {
             ValueRef::Decimal(decimal) => decimal.try_into().map_err(|err| FromSqlError::Other(Box::new(err))),
+            // rust_decimal holds 96 bits: a wide decimal converts only when it
+            // fits exactly, and fails otherwise.
+            ValueRef::Decimal256(decimal) => super::decimal256::narrow_decimal256(decimal)?
+                .try_into()
+                .map_err(|err| FromSqlError::Other(Box::new(err))),
             ValueRef::TinyInt(i) => rust_decimal::Decimal::from_i8(i).ok_or(FromSqlError::OutOfRange(i as i128)),
             ValueRef::SmallInt(i) => rust_decimal::Decimal::from_i16(i).ok_or(FromSqlError::OutOfRange(i as i128)),
             ValueRef::Int(i) => rust_decimal::Decimal::from_i32(i).ok_or(FromSqlError::OutOfRange(i as i128)),

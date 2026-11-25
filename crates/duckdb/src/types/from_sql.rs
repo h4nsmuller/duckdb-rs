@@ -2,7 +2,10 @@ use std::{error::Error, fmt};
 
 use cast;
 
-use super::{Decimal, TimeUnit, Value, ValueRef};
+use super::{
+    Decimal, Decimal256, TimeUnit, Value, ValueRef,
+    decimal256::{decimal256_to_float, decimal256_to_rounded_i128},
+};
 
 /// Enum listing possible errors from [`FromSql`] trait.
 #[derive(Debug)]
@@ -110,7 +113,7 @@ fn decimal_to_f64(decimal: Decimal) -> f64 {
 }
 
 macro_rules! from_sql_numeric(
-    ($t:ident, $decimal:expr) => (
+    ($t:ident, $decimal:expr, $decimal256:expr) => (
         impl FromSql for $t {
             #[inline]
             fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
@@ -132,6 +135,7 @@ macro_rules! from_sql_numeric(
                     ValueRef::Double(i) => <$t as cast::From<f64>>::cast(i).into_result(FromSqlError::OutOfRange(i as i128)),
 
                     ValueRef::Decimal(decimal) => ($decimal)(decimal),
+                    ValueRef::Decimal256(decimal) => ($decimal256)(decimal),
 
                     ValueRef::Timestamp(_, i) => <$t as cast::From<i64>>::cast(i).into_result(FromSqlError::OutOfRange(i as i128)),
                     ValueRef::Date32(i) => <$t as cast::From<i32>>::cast(i).into_result(FromSqlError::OutOfRange(i as i128)),
@@ -157,13 +161,17 @@ macro_rules! from_sql_integral(
             let rounded = rounded_decimal_result(decimal.value(), decimal.scale())?;
             <$t as cast::From<i128>>::cast(rounded)
                 .into_result(FromSqlError::OutOfRange(rounded))
+        }, |decimal: Decimal256| {
+            let rounded = decimal256_to_rounded_i128(decimal)?;
+            <$t as cast::From<i128>>::cast(rounded)
+                .into_result(FromSqlError::OutOfRange(rounded))
         });
     )
 );
 
 macro_rules! from_sql_float(
     ($t:ident, $decimal_to_float:ident) => (
-        from_sql_numeric!($t, |decimal: Decimal| Ok($decimal_to_float(decimal)));
+        from_sql_numeric!($t, |decimal: Decimal| Ok($decimal_to_float(decimal)), decimal256_to_float::<$t>);
     )
 );
 

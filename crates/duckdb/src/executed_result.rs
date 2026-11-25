@@ -36,6 +36,8 @@ pub(crate) struct ExecutedResult {
     column_name_cache: OnceCell<HashMap<Box<str>, usize>>,
     #[cfg(feature = "polars")]
     polars_arrow_field: OnceCell<polars_arrow::datatypes::Field>,
+    #[cfg(feature = "polars")]
+    polars_narrowed_type: OnceCell<Option<arrow::datatypes::DataType>>,
 }
 
 // SAFETY: `ExecutedResult` is Send but not Sync. It owns its DuckDB result in an
@@ -73,6 +75,8 @@ impl ExecutedResult {
             column_name_cache: OnceCell::new(),
             #[cfg(feature = "polars")]
             polars_arrow_field: OnceCell::new(),
+            #[cfg(feature = "polars")]
+            polars_narrowed_type: OnceCell::new(),
         })
     }
 
@@ -97,11 +101,34 @@ impl ExecutedResult {
             };
 
             let mut ffi_arrow_array = polars_arrow::ffi::ArrowArray::empty();
-            self.chunk_to_arrow(chunk, &mut ffi_arrow_array as *mut _ as *mut ffi::ArrowArray)?;
-
-            let field = self.polars_arrow_field()?;
-            let array = polars_arrow::ffi::import_array_from_c(ffi_arrow_array, field.dtype.clone())
-                .map_err(|err| arrow_conversion_failure("Could not import Polars Arrow array from C", err))?;
+            let array = if let Some(narrowed) = self.polars_narrowed_type()? {
+                // Polars has no 256-bit decimal. Narrow those columns to the
+                // 128-bit decimal exactly; a value that does not fit is an
+                // error.
+                let wide = self.data_chunk_to_struct_array(chunk)?;
+                let options = arrow::compute::CastOptions {
+                    safe: false,
+                    ..Default::default()
+                };
+                let narrow = arrow::compute::cast_with_options(&wide, narrowed, &options).map_err(|err| {
+                    arrow_conversion_failure("Could not narrow a DECIMAL of more than 38 digits for Polars", err)
+                })?;
+                let (array, schema) = arrow::ffi::to_ffi(&narrow.to_data())
+                    .map_err(|err| arrow_conversion_failure("Could not export Arrow array to Polars", err))?;
+                // Both structs are the Arrow C data interface `ArrowArray`;
+                // the empty one owns nothing, so it is overwritten undropped.
+                std::ptr::write(&mut ffi_arrow_array as *mut _ as *mut FFI_ArrowArray, array);
+                let field = polars_arrow::ffi::import_field_from_c(
+                    &*(&schema as *const FFI_ArrowSchema as *const polars_arrow::ffi::ArrowSchema),
+                )
+                .map_err(|err| arrow_conversion_failure("Could not import Polars Arrow field", err))?;
+                polars_arrow::ffi::import_array_from_c(ffi_arrow_array, field.dtype)
+            } else {
+                self.chunk_to_arrow(chunk, &mut ffi_arrow_array as *mut _ as *mut ffi::ArrowArray)?;
+                let field = self.polars_arrow_field()?;
+                polars_arrow::ffi::import_array_from_c(ffi_arrow_array, field.dtype.clone())
+            }
+            .map_err(|err| arrow_conversion_failure("Could not import Polars Arrow array from C", err))?;
             let struct_array = array
                 .as_any()
                 .downcast_ref::<polars_arrow::array::StructArray>()
@@ -283,6 +310,22 @@ impl ExecutedResult {
         }
     }
 
+    /// The struct type to cast a batch to before handing it to Polars, when
+    /// the result has decimals of more than 38 digits.
+    #[cfg(feature = "polars")]
+    fn polars_narrowed_type(&self) -> Result<Option<&arrow::datatypes::DataType>> {
+        if self.polars_narrowed_type.get().is_none() {
+            let wide = arrow::datatypes::DataType::Struct(self.schema.fields().clone());
+            let narrowed = narrow_decimal256_type(&wide)?;
+            let _ = self.polars_narrowed_type.set((narrowed != wide).then_some(narrowed));
+        }
+        Ok(self
+            .polars_narrowed_type
+            .get()
+            .expect("polars narrowed type cache was just initialized")
+            .as_ref())
+    }
+
     #[cfg(feature = "polars")]
     fn polars_arrow_field(&self) -> Result<&polars_arrow::datatypes::Field> {
         if self.polars_arrow_field.get().is_none() {
@@ -309,6 +352,34 @@ impl ExecutedResult {
                 .map_err(|err| arrow_conversion_failure("Could not import Polars Arrow field", err))
         }
     }
+}
+
+/// Replaces every `Decimal256` in an Arrow type by the `Decimal128` of the
+/// same scale. Polars decimals hold 38 digits; DuckDB exports a `DECIMAL` of 39
+/// to 76 digits, and from Arrow format version 1.1 also `HUGEINT` and
+/// `UHUGEINT`, as `Decimal256`.
+#[cfg(feature = "polars")]
+fn narrow_decimal256_type(data_type: &arrow::datatypes::DataType) -> Result<arrow::datatypes::DataType> {
+    use arrow::datatypes::{DECIMAL128_MAX_PRECISION, DECIMAL128_MAX_SCALE, DataType, Field};
+
+    let narrow_field = |field: &Arc<Field>| -> Result<Arc<Field>> {
+        let narrowed = narrow_decimal256_type(field.data_type())?;
+        Ok(Arc::new(field.as_ref().clone().with_data_type(narrowed)))
+    };
+    Ok(match data_type {
+        DataType::Decimal256(_, scale) if *scale > DECIMAL128_MAX_SCALE => {
+            return Err(duckdb_failure_from_message(format!(
+                "Polars decimals hold at most 38 digits: cannot convert a {data_type} column, cast it in SQL"
+            )));
+        }
+        DataType::Decimal256(width, scale) => DataType::Decimal128((*width).min(DECIMAL128_MAX_PRECISION), *scale),
+        DataType::List(field) => DataType::List(narrow_field(field)?),
+        DataType::LargeList(field) => DataType::LargeList(narrow_field(field)?),
+        DataType::FixedSizeList(field, size) => DataType::FixedSizeList(narrow_field(field)?, *size),
+        DataType::Map(field, sorted) => DataType::Map(narrow_field(field)?, *sorted),
+        DataType::Struct(fields) => DataType::Struct(fields.iter().map(narrow_field).collect::<Result<_>>()?),
+        other => other.clone(),
+    })
 }
 
 pub(crate) unsafe fn logical_type_from_duckdb_column(

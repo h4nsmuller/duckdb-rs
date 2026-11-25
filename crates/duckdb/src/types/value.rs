@@ -1,4 +1,4 @@
-use super::{Decimal, Null, OrderedMap, TimeUnit, Type};
+use super::{Decimal, Decimal256, Null, OrderedMap, TimeUnit, Type};
 
 /// Owning [dynamic type value](https://duckdb.org/docs/stable/sql/data_types/overview.html).
 /// Value's type is typically dictated by DuckDB (not by the caller).
@@ -50,6 +50,10 @@ pub enum Value {
     /// [`Decimal`] stores DuckDB's decimal width, scale, and scaled integer
     /// payload.
     Decimal(Decimal),
+    /// The value is a DuckDB decimal of 39 to 76 digits.
+    ///
+    /// [`Decimal256`] stores the width, scale, and scaled integer payload.
+    Decimal256(Decimal256),
     /// The value is a timestamp.
     Timestamp(TimeUnit, i64),
     /// The value is a text string.
@@ -209,6 +213,13 @@ impl From<Decimal> for Value {
     }
 }
 
+impl From<Decimal256> for Value {
+    #[inline]
+    fn from(decimal: Decimal256) -> Self {
+        Self::Decimal256(decimal)
+    }
+}
+
 impl From<f32> for Value {
     #[inline]
     fn from(f: f32) -> Self {
@@ -270,6 +281,7 @@ impl Value {
             Self::Float(_) => Type::Float,
             Self::Double(_) => Type::Double,
             Self::Decimal(_) => Type::Decimal,
+            Self::Decimal256(_) => Type::Decimal,
             Self::Timestamp(_, _) => Type::Timestamp,
             Self::Text(_) => Type::Text,
             Self::Blob(_) => Type::Blob,

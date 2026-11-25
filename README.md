@@ -184,8 +184,9 @@ These extensions are only available through the CMake build backend and imply `b
 - `appender-arrow` - Efficient bulk insertion of Arrow data into DuckDB tables.
 - `polars` - Integration with Polars DataFrames.
 - `rust_decimal` - Compatibility impls for `rust_decimal::Decimal`. DuckDB
-  `DECIMAL` values use `duckdb::types::Decimal` as the core full-domain
-  carrier; this feature restores `ToSql`/`FromSql` conversions for
+  `DECIMAL` values use `duckdb::types::Decimal` (up to 38 digits) and
+  `duckdb::types::Decimal256` (39 to 76 digits) as the core exact carriers;
+  this feature restores `ToSql`/`FromSql` conversions for
   `rust_decimal::Decimal` when values fit that crate's decimal domain,
   including compatibility reads from `FLOAT`, `DOUBLE`, and text columns.
 
